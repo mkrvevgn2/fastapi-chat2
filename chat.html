@@ -1,0 +1,208 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8" />
+  <title>WebSocket Chat</title>
+  <style>
+    body { font-family: sans-serif; padding: 20px; background: #f4f4f4; }
+    #messages { list-style: none; padding: 0; max-height: 300px; overflow-y: auto; }
+    li { margin-bottom: 5px; background: #fff; padding: 8px; border-radius: 5px; display: flex; align-items: center; gap: 10px; }
+    input[type="text"], input[type="file"] { padding: 6px; margin-right: 5px; }
+    button { padding: 6px 10px; }
+    .avatar { width: 32px; height: 32px; border-radius: 50%; }
+    #avatarPreview { width: 40px; height: 40px; border-radius: 50%; margin-bottom: 10px; }
+    #status { color: gray; font-size: 0.9em; margin-bottom: 10px; }
+    #fileList { margin-top: 10px; font-size: 0.9em; }
+  </style>
+</head>
+<body>
+  <h2>💬 FastAPI WebSocket Chat <span id="userCount">(0 пользователей)</span></h2>
+
+  <div id="status">🔄 Подключение...</div>
+  <img id="avatarPreview" src="" alt="avatar" />
+  <input id="username" placeholder="Ваше имя" />
+  <input id="msg" placeholder="Сообщение" />
+  <label style="cursor: pointer;">
+    📎
+    <input type="file" id="fileInput" multiple style="display: none;" />
+  </label>
+  <button onclick="send()" id="sendBtn">Отправить</button>
+
+  <div id="fileList"></div>
+  <ul id="messages"></ul>
+
+  <script>
+    let ws;
+    let latitude = null;
+    let longitude = null;
+    const usernameInput = document.getElementById("username");
+    const avatarPreview = document.getElementById("avatarPreview");
+    const messages = document.getElementById("messages");
+    const userCountSpan = document.getElementById("userCount");
+    const statusDiv = document.getElementById("status");
+    const fileInput = document.getElementById("fileInput");
+    const fileListDiv = document.getElementById("fileList");
+    const sendBtn = document.getElementById("sendBtn");
+
+    let selectedFiles = [];
+
+    // Укажите здесь базовый URL сервера (тот же, что и в ngrok или ваш)
+    const SERVER_BASE_URL = "https://6d88-34-80-176-61.ngrok-free.app";
+
+    // Session & avatar
+    let sessionId = localStorage.getItem("sessionId");
+    if (!sessionId) {
+      sessionId = crypto.randomUUID();
+      localStorage.setItem("sessionId", sessionId);
+    }
+
+    usernameInput.value = localStorage.getItem("username") || "";
+    usernameInput.addEventListener("input", () => {
+      localStorage.setItem("username", usernameInput.value);
+    });
+
+    let avatarURL = localStorage.getItem("avatarURL");
+    if (!avatarURL) {
+      const avatarSeed = Math.random().toString(36).substring(2, 10);
+      avatarURL = `https://api.dicebear.com/7.x/pixel-art/svg?seed=${avatarSeed}`;
+      localStorage.setItem("avatarURL", avatarURL);
+    }
+    avatarPreview.src = avatarURL;
+
+    // Геолокация
+    navigator.geolocation.getCurrentPosition(
+      (pos) => {
+        latitude = pos.coords.latitude;
+        longitude = pos.coords.longitude;
+      },
+      (err) => {
+        console.warn("Геолокация не получена:", err.message);
+      },
+      { enableHighAccuracy: true, timeout: 5000 }
+    );
+
+    // Подключение WebSocket
+    function connectWebSocket() {
+      ws = new WebSocket(SERVER_BASE_URL.replace(/^http/, 'ws') + "/ws/chat");
+      ws.onopen = () => {
+        statusDiv.textContent = "🟢 Подключено";
+        sendBtn.disabled = false;
+        ws.send(JSON.stringify({
+          sessionId,
+          username: usernameInput.value || "Аноним",
+          latitude,
+          longitude
+        }));
+      };
+
+      ws.onmessage = (event) => {
+        const data = JSON.parse(event.data);
+
+        if (data.user_count !== undefined) {
+          userCountSpan.textContent = `(${data.user_count} пользователь${data.user_count === 1 ? '' : 'ей'})`;
+          return;
+        }
+
+        const distInfo = data.distance_km !== null ? ` (~${data.distance_km.toFixed(1)} км от вас)` : '';
+
+        const msg = document.createElement("li");
+
+        const avatar = document.createElement("img");
+        avatar.src = data.avatar || "";
+        avatar.className = "avatar";
+
+        const text = document.createElement("span");
+        text.textContent = `[${data.timestamp}] ${data.username}: ${data.message}${distInfo}`;
+
+        msg.appendChild(avatar);
+        msg.appendChild(text);
+        messages.appendChild(msg);
+        msg.scrollIntoView({ behavior: "smooth" });
+      };
+
+      ws.onclose = () => {
+        statusDiv.textContent = "🔴 Соединение потеряно. Повторная попытка...";
+        sendBtn.disabled = true;
+        setTimeout(connectWebSocket, 3000);
+      };
+
+      ws.onerror = () => {
+        statusDiv.textContent = "⚠️ Ошибка соединения.";
+        sendBtn.disabled = true;
+      };
+    }
+
+    connectWebSocket();
+
+    // Обработчик выбора файлов
+    fileInput.addEventListener("change", (event) => {
+      selectedFiles = Array.from(event.target.files);
+      renderFileList();
+    });
+
+    // Отображение списка файлов
+    function renderFileList() {
+      if (selectedFiles.length === 0) {
+        fileListDiv.innerHTML = "";
+        return;
+      }
+
+      const items = selectedFiles.map(f => `<li>${f.name} (${Math.round(f.size / 1024)} KB)</li>`);
+      fileListDiv.innerHTML = `<b>📎 Прикреплённые файлы:</b><ul>${items.join("")}</ul>`;
+    }
+
+    // Отправка сообщения и файлов
+    async function send() {
+      const username = usernameInput.value || "Аноним";
+      const message = document.getElementById("msg").value.trim();
+      if (!message && selectedFiles.length === 0) return;
+
+      const payload = {
+        sessionId,
+        username,
+        message,
+        latitude,
+        longitude,
+        avatar: avatarURL
+      };
+
+      if (ws.readyState !== WebSocket.OPEN) {
+        alert("Нет соединения с сервером.");
+        return;
+      }
+
+      // Отправляем сообщение по WebSocket
+      ws.send(JSON.stringify(payload));
+
+      // Отправляем файлы, если есть
+      if (selectedFiles.length > 0) {
+        const formData = new FormData();
+        selectedFiles.forEach((file) => {
+          formData.append("files", file);
+        });
+        formData.append("username", username);
+
+        try {
+          const response = await fetch(SERVER_BASE_URL + "/upload", {
+            method: "POST",
+            body: formData
+          });
+          if (!response.ok) {
+            console.error("Ошибка загрузки файлов:", response.statusText);
+            alert("Ошибка загрузки файлов: " + response.statusText);
+          }
+        } catch (err) {
+          console.error("Ошибка загрузки файлов:", err);
+          alert("Ошибка загрузки файлов. Проверьте соединение.");
+        }
+      }
+
+      // Очистка
+      document.getElementById("msg").value = "";
+      fileInput.value = "";
+      selectedFiles = [];
+      renderFileList();
+    }
+  </script>
+</body>
+</html>
